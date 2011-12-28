@@ -1,4 +1,4 @@
-require File.dirname(__FILE__) + '/helper'
+require File.expand_path('../helper', __FILE__)
 
 class BaseTest < Test::Unit::TestCase
   def test_default
@@ -71,7 +71,7 @@ class BaseTest < Test::Unit::TestCase
     end
 
     it 'exposes the downstream app' do
-      middleware = TestMiddleware.new(app)
+      middleware = TestMiddleware.new!(app)
       assert_same app, middleware.app
     end
 

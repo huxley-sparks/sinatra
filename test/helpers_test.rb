@@ -1,23 +1,119 @@
-require File.dirname(__FILE__) + '/helper'
+require File.expand_path('../helper', __FILE__)
+require 'date'
 
 class HelpersTest < Test::Unit::TestCase
   def test_default
     assert true
   end
 
+  def status_app(code, &block)
+    code += 2 if [204, 205, 304].include? code
+    block ||= proc { }
+    mock_app do
+      get '/' do
+        status code
+        instance_eval(&block).inspect
+      end
+    end
+    get '/'
+  end
+
   describe 'status' do
-    setup do
-      mock_app {
-        get '/' do
-          status 207
-          nil
-        end
-      }
+    it 'sets the response status code' do
+      status_app 207
+      assert_equal 207, response.status
+    end
+  end
+
+  describe 'not_found?' do
+    it 'is true for status == 404' do
+      status_app(404) { not_found? }
+      assert_body 'true'
     end
 
-    it 'sets the response status code' do
-      get '/'
-      assert_equal 207, response.status
+    it 'is false for status > 404' do
+      status_app(405) { not_found? }
+      assert_body 'false'
+    end
+
+    it 'is false for status < 404' do
+      status_app(403) { not_found? }
+      assert_body 'false'
+    end
+  end
+
+  describe 'informational?' do
+    it 'is true for 1xx status' do
+      status_app(100 + rand(100)) { informational? }
+      assert_body 'true'
+    end
+
+    it 'is false for status > 199' do
+      status_app(200 + rand(400)) { informational? }
+      assert_body 'false'
+    end
+  end
+
+  describe 'success?' do
+    it 'is true for 2xx status' do
+      status_app(200 + rand(100)) { success? }
+      assert_body 'true'
+    end
+
+    it 'is false for status < 200' do
+      status_app(100 + rand(100)) { success? }
+      assert_body 'false'
+    end
+
+    it 'is false for status > 299' do
+      status_app(300 + rand(300)) { success? }
+      assert_body 'false'
+    end
+  end
+
+  describe 'redirect?' do
+    it 'is true for 3xx status' do
+      status_app(300 + rand(100)) { redirect? }
+      assert_body 'true'
+    end
+
+    it 'is false for status < 300' do
+      status_app(200 + rand(100)) { redirect? }
+      assert_body 'false'
+    end
+
+    it 'is false for status > 399' do
+      status_app(400 + rand(200)) { redirect? }
+      assert_body 'false'
+    end
+  end
+
+  describe 'client_error?' do
+    it 'is true for 4xx status' do
+      status_app(400 + rand(100)) { client_error? }
+      assert_body 'true'
+    end
+
+    it 'is false for status < 400' do
+      status_app(200 + rand(200)) { client_error? }
+      assert_body 'false'
+    end
+
+    it 'is false for status > 499' do
+      status_app(500 + rand(100)) { client_error? }
+      assert_body 'false'
+    end
+  end
+
+  describe 'server_error?' do
+    it 'is true for 5xx status' do
+      status_app(500 + rand(100)) { server_error? }
+      assert_body 'true'
+    end
+
+    it 'is false for status < 500' do
+      status_app(200 + rand(300)) { server_error? }
+      assert_body 'false'
     end
   end
 
@@ -57,7 +153,7 @@ class HelpersTest < Test::Unit::TestCase
       get '/'
       assert_equal 302, status
       assert_equal '', body
-      assert_equal '/foo', response['Location']
+      assert_equal 'http://example.org/foo', response['Location']
     end
 
     it 'uses the code given when specified' do
@@ -71,7 +167,7 @@ class HelpersTest < Test::Unit::TestCase
       get '/'
       assert_equal 301, status
       assert_equal '', body
-      assert_equal '/foo', response['Location']
+      assert_equal 'http://example.org/foo', response['Location']
     end
 
     it 'redirects back to request.referer when passed back' do
@@ -84,7 +180,87 @@ class HelpersTest < Test::Unit::TestCase
       request = Rack::MockRequest.new(@app)
       response = request.get('/try_redirect', 'HTTP_REFERER' => '/foo')
       assert_equal 302, response.status
-      assert_equal '/foo', response['Location']
+      assert_equal 'http://example.org/foo', response['Location']
+    end
+
+    it 'redirects using a non-standard HTTP port' do
+      mock_app {
+        get '/' do
+          redirect '/foo'
+        end
+      }
+
+      request = Rack::MockRequest.new(@app)
+      response = request.get('/', 'SERVER_PORT' => '81')
+      assert_equal 'http://example.org:81/foo', response['Location']
+    end
+
+    it 'redirects using a non-standard HTTPS port' do
+      mock_app {
+        get '/' do
+          redirect '/foo'
+        end
+      }
+
+      request = Rack::MockRequest.new(@app)
+      response = request.get('/', 'SERVER_PORT' => '444')
+      assert_equal 'http://example.org:444/foo', response['Location']
+    end
+
+    it 'uses 303 for post requests if request is HTTP 1.1' do
+      mock_app { post('/') { redirect '/'} }
+      post '/', {}, 'HTTP_VERSION' => 'HTTP/1.1'
+      assert_equal 303, status
+      assert_equal '', body
+      assert_equal 'http://example.org/', response['Location']
+    end
+
+    it 'uses 302 for post requests if request is HTTP 1.0' do
+      mock_app { post('/') { redirect '/'} }
+      post '/', {}, 'HTTP_VERSION' => 'HTTP/1.0'
+      assert_equal 302, status
+      assert_equal '', body
+      assert_equal 'http://example.org/', response['Location']
+    end
+
+    it 'works behind a reverse proxy' do
+      mock_app do
+        get '/' do
+          redirect '/foo'
+        end
+      end
+
+      request = Rack::MockRequest.new(@app)
+      response = request.get('/', 'HTTP_X_FORWARDED_HOST' => 'example.com', 'SERVER_PORT' => '8080')
+      assert_equal 'http://example.com/foo', response['Location']
+    end
+
+    it 'accepts absolute URIs' do
+      mock_app do
+        get '/' do
+          redirect 'http://google.com'
+          fail 'redirect should halt'
+        end
+      end
+
+      get '/'
+      assert_equal 302, status
+      assert_equal '', body
+      assert_equal 'http://google.com', response['Location']
+    end
+
+    it 'accepts absolute URIs with a different schema' do
+      mock_app do
+        get '/' do
+          redirect 'mailto:jsmith@example.com'
+          fail 'redirect should halt'
+        end
+      end
+
+      get '/'
+      assert_equal 302, status
+      assert_equal '', body
+      assert_equal 'mailto:jsmith@example.com', response['Location']
     end
   end
 
@@ -204,7 +380,7 @@ class HelpersTest < Test::Unit::TestCase
         enable :sessions
 
         get '/' do
-          assert session.empty?
+          assert session[:foo].nil?
           session[:foo] = 'bar'
           redirect '/hi'
         end
@@ -217,6 +393,62 @@ class HelpersTest < Test::Unit::TestCase
       get '/'
       follow_redirect!
       assert_equal 'hi bar', body
+    end
+
+    it 'inserts session middleware' do
+      mock_app do
+        enable :sessions
+        get '/' do
+          assert env['rack.session']
+          assert env['rack.session.options']
+          'ok'
+        end
+      end
+
+      get '/'
+      assert_body 'ok'
+    end
+
+    it 'sets a default session secret' do
+      mock_app do
+        enable :sessions
+        get '/' do
+          secret = env['rack.session.options'][:secret]
+          assert secret
+          assert_equal secret, settings.session_secret
+          'ok'
+        end
+      end
+
+      get '/'
+      assert_body 'ok'
+    end
+
+    it 'allows disabling session secret' do
+      mock_app do
+        enable :sessions
+        disable :session_secret
+        get '/' do
+          assert !env['rack.session.options'].include?(:session_secret)
+          'ok'
+        end
+      end
+
+      get '/'
+      assert_body 'ok'
+    end
+
+    it 'accepts an options hash' do
+      mock_app do
+        set :sessions, :foo => :bar
+        get '/' do
+          assert_equal env['rack.session.options'][:foo], :bar
+          'ok'
+        end
+      end
+
+      get '/'
+      assert_body 'ok'
     end
   end
 
@@ -266,21 +498,21 @@ class HelpersTest < Test::Unit::TestCase
       }
 
       get '/'
-      assert_equal 'text/plain', response['Content-Type']
+      assert_equal 'text/plain;charset=utf-8', response['Content-Type']
       assert_equal 'Hello World', body
     end
 
     it 'takes media type parameters (like charset=)' do
       mock_app {
         get '/' do
-          content_type 'text/html', :charset => 'utf-8'
+          content_type 'text/html', :charset => 'latin1'
           "<h1>Hello, World</h1>"
         end
       }
 
       get '/'
       assert ok?
-      assert_equal 'text/html;charset=utf-8', response['Content-Type']
+      assert_equal 'text/html;charset=latin1', response['Content-Type']
       assert_equal "<h1>Hello, World</h1>", body
     end
 
@@ -309,6 +541,94 @@ class HelpersTest < Test::Unit::TestCase
 
       assert_raise(RuntimeError) { get '/foo.xml' }
     end
+
+    it 'only sets default charset for specific mime types' do
+      tests_ran = false
+      mock_app do
+        mime_type :foo, 'text/foo'
+        mime_type :bar, 'application/bar'
+        mime_type :baz, 'application/baz'
+        add_charset << mime_type(:baz)
+        get '/' do
+          assert_equal content_type(:txt),    'text/plain;charset=utf-8'
+          assert_equal content_type(:css),    'text/css;charset=utf-8'
+          assert_equal content_type(:html),   'text/html;charset=utf-8'
+          assert_equal content_type(:foo),    'text/foo;charset=utf-8'
+          assert_equal content_type(:xml),    'application/xml;charset=utf-8'
+          assert_equal content_type(:xhtml),  'application/xhtml+xml;charset=utf-8'
+          assert_equal content_type(:js),     'application/javascript;charset=utf-8'
+          assert_equal content_type(:json),   'application/json;charset=utf-8'
+          assert_equal content_type(:bar),    'application/bar'
+          assert_equal content_type(:png),    'image/png'
+          assert_equal content_type(:baz),    'application/baz;charset=utf-8'
+          tests_ran = true
+          "done"
+        end
+      end
+      get '/'
+      assert tests_ran
+    end
+
+    it 'handles already present params' do
+      mock_app do
+        get '/' do
+          content_type 'foo/bar;level=1', :charset => 'utf-8'
+          'ok'
+        end
+      end
+      get '/'
+      assert_equal 'foo/bar;level=1, charset=utf-8', response['Content-Type']
+    end
+
+    it 'does not add charset if present' do
+      mock_app do
+        get '/' do
+          content_type 'text/plain;charset=utf-16'
+          'ok'
+        end
+      end
+      get '/'
+      assert_equal 'text/plain;charset=utf-16', response['Content-Type']
+    end
+  end
+
+  describe 'attachment' do
+    def attachment_app(filename=nil)
+      mock_app {       
+        get '/attachment' do
+          attachment filename
+          response.write("<sinatra></sinatra>")
+        end
+      }
+    end
+    
+    it 'sets the Content-Type response header' do
+      attachment_app('test.xml')
+      get '/attachment'
+      assert_equal 'application/xml;charset=utf-8', response['Content-Type']
+      assert_equal '<sinatra></sinatra>', body
+    end 
+    
+    it 'sets the Content-Type response header without extname' do
+      attachment_app('test')
+      get '/attachment'
+      assert_equal 'text/html;charset=utf-8', response['Content-Type']
+      assert_equal '<sinatra></sinatra>', body   
+    end
+    
+    it 'sets the Content-Type response header without extname' do
+      mock_app do
+        get '/attachment' do
+          content_type :atom
+          attachment 'test.xml'
+          response.write("<sinatra></sinatra>")
+        end
+      end
+      get '/attachment'
+      assert_equal 'application/atom+xml', response['Content-Type']
+      assert_equal '<sinatra></sinatra>', body   
+    end
+    
   end
 
   describe 'send_file' do
@@ -341,7 +661,19 @@ class HelpersTest < Test::Unit::TestCase
     it 'sets the Content-Type response header if a mime-type can be located' do
       send_file_app
       get '/file.txt'
-      assert_equal 'text/plain', response['Content-Type']
+      assert_equal 'text/plain;charset=utf-8', response['Content-Type']
+    end
+
+    it 'sets the Content-Type response header if type option is set to a file extesion' do
+      send_file_app :type => 'html'
+      get '/file.txt'
+      assert_equal 'text/html;charset=utf-8', response['Content-Type']
+    end
+
+    it 'sets the Content-Type response header if type option is set to a mime type' do
+      send_file_app :type => 'application/octet-stream'
+      get '/file.txt'
+      assert_equal 'application/octet-stream', response['Content-Type']
     end
 
     it 'sets the Content-Length response header' do
@@ -354,6 +686,13 @@ class HelpersTest < Test::Unit::TestCase
       send_file_app
       get '/file.txt'
       assert_equal File.mtime(@file).httpdate, response['Last-Modified']
+    end
+
+    it 'allows passing in a differen Last-Modified response header with :last_modified' do
+      time = Time.now
+      send_file_app :last_modified => time
+      get '/file.txt'
+      assert_equal time.httpdate, response['Last-Modified']
     end
 
     it "returns a 404 when not found" do
@@ -378,133 +717,905 @@ class HelpersTest < Test::Unit::TestCase
       assert_equal 'attachment; filename="file.txt"', response['Content-Disposition']
     end
 
+    it "sets the Content-Disposition header when :disposition set to 'inline'" do
+      send_file_app :disposition => 'inline'
+      get '/file.txt'
+      assert_equal 'inline', response['Content-Disposition']
+    end
+
     it "sets the Content-Disposition header when :filename provided" do
       send_file_app :filename => 'foo.txt'
       get '/file.txt'
       assert_equal 'attachment; filename="foo.txt"', response['Content-Disposition']
     end
+
+    it "is able to send files with unkown mime type" do
+      @file = File.dirname(__FILE__) + '/file.foobar'
+      File.open(@file, 'wb') { |io| io.write('Hello World') }
+      send_file_app
+      get '/file.txt'
+      assert_equal 'application/octet-stream', response['Content-Type']
+    end
+
+    it "does not override Content-Type if already set and no explicit type is given" do
+      path = @file
+      mock_app do
+        get '/' do
+          content_type :png
+          send_file path
+        end
+      end
+      get '/'
+      assert_equal 'image/png', response['Content-Type']
+    end
+
+    it "does override Content-Type even if already set, if explicit type is given" do
+      path = @file
+      mock_app do
+        get '/' do
+          content_type :png
+          send_file path, :type => :gif
+        end
+      end
+      get '/'
+      assert_equal 'image/gif', response['Content-Type']
+    end
   end
 
   describe 'cache_control' do
     setup do
-      mock_app {
-        get '/' do
-          cache_control :public, :no_cache, :max_age => 60
+      mock_app do
+        get '/foo' do
+          cache_control :public, :no_cache, :max_age => 60.0
           'Hello World'
         end
-      }
+
+        get '/bar' do
+          cache_control :public, :no_cache
+          'Hello World'
+        end
+      end
     end
 
     it 'sets the Cache-Control header' do
-      get '/'
+      get '/foo'
       assert_equal ['public', 'no-cache', 'max-age=60'], response['Cache-Control'].split(', ')
+    end
+
+    it 'last argument does not have to be a hash' do
+      get '/bar'
+      assert_equal ['public', 'no-cache'], response['Cache-Control'].split(', ')
     end
   end
 
   describe 'expires' do
     setup do
-      mock_app {
-        get '/' do
+      mock_app do
+        get '/foo' do
           expires 60, :public, :no_cache
           'Hello World'
         end
-      }
+
+        get '/bar' do
+          expires Time.now
+        end
+
+        get '/baz' do
+          expires Time.at(0)
+        end
+
+        get '/blah' do
+          obj = Object.new
+          def obj.method_missing(*a, &b) 60.send(*a, &b) end
+          def obj.is_a?(thing) 60.is_a?(thing) end
+          expires obj, :public, :no_cache
+          'Hello World'
+        end
+
+        get '/boom' do
+          expires '9999'
+        end
+      end
     end
 
     it 'sets the Cache-Control header' do
-      get '/'
+      get '/foo'
       assert_equal ['public', 'no-cache', 'max-age=60'], response['Cache-Control'].split(', ')
     end
 
     it 'sets the Expires header' do
-      get '/'
+      get '/foo'
       assert_not_nil response['Expires']
+    end
+
+    it 'allows passing time objects' do
+      get '/bar'
+      assert_not_nil response['Expires']
+    end
+
+    it 'allows passing time objects' do
+      get '/baz'
+      assert_equal 'Thu, 01 Jan 1970 00:00:00 GMT', response['Expires']
+    end
+
+    it 'accepts values pretending to be a Numeric (like ActiveSupport::Duration)' do
+      get '/blah'
+      assert_equal ['public', 'no-cache', 'max-age=60'], response['Cache-Control'].split(', ')
+    end
+
+    it 'fails when Time.parse raises an ArgumentError' do
+      assert_raise(ArgumentError) { get '/boom' }
     end
   end
 
   describe 'last_modified' do
-    setup do
-      now = Time.now
-      mock_app {
-        get '/' do
-          body { 'Hello World' }
-          last_modified now
-          'Boo!'
-        end
-      }
-      @now = now
-    end
-
-    it 'sets the Last-Modified header to a valid RFC 2616 date value' do
-      get '/'
-      assert_equal @now.httpdate, response['Last-Modified']
-    end
-
-    it 'returns a body when conditional get misses' do
-      get '/'
-      assert_equal 200, status
-      assert_equal 'Boo!', body
-    end
-
-    it 'halts when a conditional GET matches' do
-      get '/', {}, { 'HTTP_IF_MODIFIED_SINCE' => @now.httpdate }
-      assert_equal 304, status
-      assert_equal '', body
-    end
-
     it 'ignores nil' do
-      mock_app {
+      mock_app do
         get '/' do last_modified nil; 200; end
-      }
+      end
 
       get '/'
       assert ! response['Last-Modified']
     end
+
+    it 'does not change a status other than 200' do
+      mock_app do
+        get '/' do
+          status 299
+          last_modified Time.at(0)
+          'ok'
+        end
+      end
+
+      get('/', {}, 'HTTP_IF_MODIFIED_SINCE' => 'Sun, 26 Sep 2030 23:43:52 GMT')
+      assert_status 299
+      assert_body 'ok'
+    end
+
+    [Time.now, DateTime.now, Date.today, Time.now.to_i,
+      Struct.new(:to_time).new(Time.now) ].each do |last_modified_time|
+      describe "with #{last_modified_time.class.name}" do
+        setup do
+          mock_app do
+            get '/' do
+              last_modified last_modified_time
+              'Boo!'
+            end
+          end
+          wrapper = Object.new.extend Sinatra::Helpers
+          @last_modified_time = wrapper.time_for last_modified_time
+        end
+
+        # fixes strange missing test error when running complete test suite.
+        it("does not complain about missing tests") { }
+
+        context "when there's no If-Modified-Since header" do
+          it 'sets the Last-Modified header to a valid RFC 2616 date value' do
+            get '/'
+            assert_equal @last_modified_time.httpdate, response['Last-Modified']
+          end
+
+          it 'conditional GET misses and returns a body' do
+            get '/'
+            assert_equal 200, status
+            assert_equal 'Boo!', body
+          end
+        end
+
+        context "when there's an invalid If-Modified-Since header" do
+          it 'sets the Last-Modified header to a valid RFC 2616 date value' do
+            get '/', {}, { 'HTTP_IF_MODIFIED_SINCE' => 'a really weird date' }
+            assert_equal @last_modified_time.httpdate, response['Last-Modified']
+          end
+
+          it 'conditional GET misses and returns a body' do
+            get '/', {}, { 'HTTP_IF_MODIFIED_SINCE' => 'a really weird date' }
+            assert_equal 200, status
+            assert_equal 'Boo!', body
+          end
+        end
+
+        context "when the resource has been modified since the If-Modified-Since header date" do
+          it 'sets the Last-Modified header to a valid RFC 2616 date value' do
+            get '/', {}, { 'HTTP_IF_MODIFIED_SINCE' => (@last_modified_time - 1).httpdate }
+            assert_equal @last_modified_time.httpdate, response['Last-Modified']
+          end
+
+          it 'conditional GET misses and returns a body' do
+            get '/', {}, { 'HTTP_IF_MODIFIED_SINCE' => (@last_modified_time - 1).httpdate }
+            assert_equal 200, status
+            assert_equal 'Boo!', body
+          end
+
+          it 'does not rely on string comparison' do
+            mock_app do
+              get '/compare' do
+                last_modified "Mon, 18 Oct 2010 20:57:11 GMT"
+                "foo"
+              end
+            end
+
+            get '/compare', {}, { 'HTTP_IF_MODIFIED_SINCE' => 'Sun, 26 Sep 2010 23:43:52 GMT' }
+            assert_equal 200, status
+            assert_equal 'foo', body
+            get '/compare', {}, { 'HTTP_IF_MODIFIED_SINCE' => 'Sun, 26 Sep 2030 23:43:52 GMT' }
+            assert_equal 304, status
+            assert_equal '', body
+          end
+        end
+
+        context "when the resource has been modified on the exact If-Modified-Since header date" do
+          it 'sets the Last-Modified header to a valid RFC 2616 date value' do
+            get '/', {}, { 'HTTP_IF_MODIFIED_SINCE' => @last_modified_time.httpdate }
+            assert_equal @last_modified_time.httpdate, response['Last-Modified']
+          end
+
+          it 'conditional GET matches and halts' do
+            get '/', {}, { 'HTTP_IF_MODIFIED_SINCE' => @last_modified_time.httpdate }
+            assert_equal 304, status
+            assert_equal '', body
+          end
+        end
+
+        context "when the resource hasn't been modified since the If-Modified-Since header date" do
+          it 'sets the Last-Modified header to a valid RFC 2616 date value' do
+            get '/', {}, { 'HTTP_IF_MODIFIED_SINCE' => (@last_modified_time + 1).httpdate }
+            assert_equal @last_modified_time.httpdate, response['Last-Modified']
+          end
+
+          it 'conditional GET matches and halts' do
+            get '/', {}, { 'HTTP_IF_MODIFIED_SINCE' => (@last_modified_time + 1).httpdate }
+            assert_equal 304, status
+            assert_equal '', body
+          end
+        end
+
+        context "If-Unmodified-Since" do
+          it 'results in 200 if resource has not been modified' do
+            get '/', {}, { 'HTTP_IF_UNMODIFIED_SINCE' => 'Sun, 26 Sep 2030 23:43:52 GMT' }
+            assert_equal 200, status
+            assert_equal 'Boo!', body
+          end
+
+          it 'results in 412 if resource has been modified' do
+            get '/', {}, { 'HTTP_IF_UNMODIFIED_SINCE' => Time.at(0).httpdate }
+            assert_equal 412, status
+            assert_equal '', body
+          end
+        end
+      end
+    end
   end
 
   describe 'etag' do
-    setup do
-      mock_app {
-        get '/' do
-          body { 'Hello World' }
-          etag 'FOO'
-          'Boo!'
+    context "safe requests" do
+      it 'returns 200 for normal requests' do
+        mock_app do
+          get '/' do
+            etag 'foo'
+            'ok'
+          end
         end
-      }
+
+        get('/')
+        assert_status 200
+        assert_body 'ok'
+      end
+
+      context "If-None-Match" do
+        it 'returns 304 when If-None-Match is *' do
+          mock_app do
+            get '/' do
+              etag 'foo'
+              'ok'
+            end
+          end
+
+          get('/', {}, 'HTTP_IF_NONE_MATCH' => '*')
+          assert_status 304
+          assert_body ''
+        end
+
+        it 'returns 200 when If-None-Match is * for new resources' do
+          mock_app do
+            get '/' do
+              etag 'foo', :new_resource => true
+              'ok'
+            end
+          end
+
+          get('/', {}, 'HTTP_IF_NONE_MATCH' => '*')
+          assert_status 200
+          assert_body 'ok'
+        end
+
+        it 'returns 304 when If-None-Match is * for existing resources' do
+          mock_app do
+            get '/' do
+              etag 'foo', :new_resource => false
+              'ok'
+            end
+          end
+
+          get('/', {}, 'HTTP_IF_NONE_MATCH' => '*')
+          assert_status 304
+          assert_body ''
+        end
+
+        it 'returns 304 when If-None-Match is the etag' do
+          mock_app do
+            get '/' do
+              etag 'foo'
+              'ok'
+            end
+          end
+
+          get('/', {}, 'HTTP_IF_NONE_MATCH' => '"foo"')
+          assert_status 304
+          assert_body ''
+        end
+
+        it 'returns 304 when If-None-Match includes the etag' do
+          mock_app do
+            get '/' do
+              etag 'foo'
+              'ok'
+            end
+          end
+
+          get('/', {}, 'HTTP_IF_NONE_MATCH' => '"bar", "foo"')
+          assert_status 304
+          assert_body ''
+        end
+
+        it 'returns 200 when If-None-Match does not include the etag' do
+          mock_app do
+            get '/' do
+              etag 'foo'
+              'ok'
+            end
+          end
+
+          get('/', {}, 'HTTP_IF_NONE_MATCH' => '"bar"')
+          assert_status 200
+          assert_body 'ok'
+        end
+
+        it 'ignores If-Modified-Since if If-None-Match does not match' do
+          mock_app do
+            get '/' do
+              etag 'foo'
+              last_modified Time.at(0)
+              'ok'
+            end
+          end
+
+          get('/', {}, 'HTTP_IF_NONE_MATCH' => '"bar"')
+          assert_status 200
+          assert_body 'ok'
+        end
+
+        it 'does not change a status code other than 2xx or 304' do
+          mock_app do
+            get '/' do
+              status 499
+              etag 'foo'
+              'ok'
+            end
+          end
+
+          get('/', {}, 'HTTP_IF_NONE_MATCH' => '"foo"')
+          assert_status 499
+          assert_body 'ok'
+        end
+
+        it 'does change 2xx status codes' do
+          mock_app do
+            get '/' do
+              status 299
+              etag 'foo'
+              'ok'
+            end
+          end
+
+          get('/', {}, 'HTTP_IF_NONE_MATCH' => '"foo"')
+          assert_status 304
+          assert_body ''
+        end
+
+        it 'does not send a body on 304 status codes' do
+          mock_app do
+            get '/' do
+              status 304
+              etag 'foo'
+              'ok'
+            end
+          end
+
+          get('/', {}, 'HTTP_IF_NONE_MATCH' => '"foo"')
+          assert_status 304
+          assert_body ''
+        end
+      end
+
+      context "If-Match" do
+        it 'returns 200 when If-Match is the etag' do
+          mock_app do
+            get '/' do
+              etag 'foo'
+              'ok'
+            end
+          end
+
+          get('/', {}, 'HTTP_IF_MATCH' => '"foo"')
+          assert_status 200
+          assert_body 'ok'
+        end
+
+        it 'returns 200 when If-Match includes the etag' do
+          mock_app do
+            get '/' do
+              etag 'foo'
+              'ok'
+            end
+          end
+
+          get('/', {}, 'HTTP_IF_MATCH' => '"foo", "bar"')
+          assert_status 200
+          assert_body 'ok'
+        end
+
+        it 'returns 200 when If-Match is *' do
+          mock_app do
+            get '/' do
+              etag 'foo'
+              'ok'
+            end
+          end
+
+          get('/', {}, 'HTTP_IF_MATCH' => '*')
+          assert_status 200
+          assert_body 'ok'
+        end
+
+        it 'returns 412 when If-Match is * for new resources' do
+          mock_app do
+            get '/' do
+              etag 'foo', :new_resource => true
+              'ok'
+            end
+          end
+
+          get('/', {}, 'HTTP_IF_MATCH' => '*')
+          assert_status 412
+          assert_body ''
+        end
+
+        it 'returns 200 when If-Match is * for existing resources' do
+          mock_app do
+            get '/' do
+              etag 'foo', :new_resource => false
+              'ok'
+            end
+          end
+
+          get('/', {}, 'HTTP_IF_MATCH' => '*')
+          assert_status 200
+          assert_body 'ok'
+        end
+
+        it 'returns 412 when If-Match does not include the etag' do
+          mock_app do
+            get '/' do
+              etag 'foo'
+              'ok'
+            end
+          end
+
+          get('/', {}, 'HTTP_IF_MATCH' => '"bar"')
+          assert_status 412
+          assert_body ''
+        end
+      end
     end
 
-    it 'sets the ETag header' do
-      get '/'
-      assert_equal '"FOO"', response['ETag']
+    context "idempotent requests" do
+      it 'returns 200 for normal requests' do
+        mock_app do
+          put '/' do
+            etag 'foo'
+            'ok'
+          end
+        end
+
+        put('/')
+        assert_status 200
+        assert_body 'ok'
+      end
+
+      context "If-None-Match" do
+        it 'returns 412 when If-None-Match is *' do
+          mock_app do
+            put '/' do
+              etag 'foo'
+              'ok'
+            end
+          end
+
+          put('/', {}, 'HTTP_IF_NONE_MATCH' => '*')
+          assert_status 412
+          assert_body ''
+        end
+
+        it 'returns 200 when If-None-Match is * for new resources' do
+          mock_app do
+            put '/' do
+              etag 'foo', :new_resource => true
+              'ok'
+            end
+          end
+
+          put('/', {}, 'HTTP_IF_NONE_MATCH' => '*')
+          assert_status 200
+          assert_body 'ok'
+        end
+
+        it 'returns 412 when If-None-Match is * for existing resources' do
+          mock_app do
+            put '/' do
+              etag 'foo', :new_resource => false
+              'ok'
+            end
+          end
+
+          put('/', {}, 'HTTP_IF_NONE_MATCH' => '*')
+          assert_status 412
+          assert_body ''
+        end
+
+        it 'returns 412 when If-None-Match is the etag' do
+          mock_app do
+            put '/' do
+              etag 'foo'
+              'ok'
+            end
+          end
+
+          put('/', {}, 'HTTP_IF_NONE_MATCH' => '"foo"')
+          assert_status 412
+          assert_body ''
+        end
+
+        it 'returns 412 when If-None-Match includes the etag' do
+          mock_app do
+            put '/' do
+              etag 'foo'
+              'ok'
+            end
+          end
+
+          put('/', {}, 'HTTP_IF_NONE_MATCH' => '"bar", "foo"')
+          assert_status 412
+          assert_body ''
+        end
+
+        it 'returns 200 when If-None-Match does not include the etag' do
+          mock_app do
+            put '/' do
+              etag 'foo'
+              'ok'
+            end
+          end
+
+          put('/', {}, 'HTTP_IF_NONE_MATCH' => '"bar"')
+          assert_status 200
+          assert_body 'ok'
+        end
+
+        it 'ignores If-Modified-Since if If-None-Match does not match' do
+          mock_app do
+            put '/' do
+              etag 'foo'
+              last_modified Time.at(0)
+              'ok'
+            end
+          end
+
+          put('/', {}, 'HTTP_IF_NONE_MATCH' => '"bar"')
+          assert_status 200
+          assert_body 'ok'
+        end
+      end
+
+      context "If-Match" do
+        it 'returns 200 when If-Match is the etag' do
+          mock_app do
+            put '/' do
+              etag 'foo'
+              'ok'
+            end
+          end
+
+          put('/', {}, 'HTTP_IF_MATCH' => '"foo"')
+          assert_status 200
+          assert_body 'ok'
+        end
+
+        it 'returns 200 when If-Match includes the etag' do
+          mock_app do
+            put '/' do
+              etag 'foo'
+              'ok'
+            end
+          end
+
+          put('/', {}, 'HTTP_IF_MATCH' => '"foo", "bar"')
+          assert_status 200
+          assert_body 'ok'
+        end
+
+        it 'returns 200 when If-Match is *' do
+          mock_app do
+            put '/' do
+              etag 'foo'
+              'ok'
+            end
+          end
+
+          put('/', {}, 'HTTP_IF_MATCH' => '*')
+          assert_status 200
+          assert_body 'ok'
+        end
+
+        it 'returns 412 when If-Match is * for new resources' do
+          mock_app do
+            put '/' do
+              etag 'foo', :new_resource => true
+              'ok'
+            end
+          end
+
+          put('/', {}, 'HTTP_IF_MATCH' => '*')
+          assert_status 412
+          assert_body ''
+        end
+
+        it 'returns 200 when If-Match is * for existing resources' do
+          mock_app do
+            put '/' do
+              etag 'foo', :new_resource => false
+              'ok'
+            end
+          end
+
+          put('/', {}, 'HTTP_IF_MATCH' => '*')
+          assert_status 200
+          assert_body 'ok'
+        end
+
+        it 'returns 412 when If-Match does not include the etag' do
+          mock_app do
+            put '/' do
+              etag 'foo'
+              'ok'
+            end
+          end
+
+          put('/', {}, 'HTTP_IF_MATCH' => '"bar"')
+          assert_status 412
+          assert_body ''
+        end
+      end
     end
 
-    it 'returns a body when conditional get misses' do
-      get '/'
-      assert_equal 200, status
-      assert_equal 'Boo!', body
-    end
+    context "post requests" do
+      it 'returns 200 for normal requests' do
+        mock_app do
+          post '/' do
+            etag 'foo'
+            'ok'
+          end
+        end
 
-    it 'halts when a conditional GET matches' do
-      get '/', {}, { 'HTTP_IF_NONE_MATCH' => '"FOO"' }
-      assert_equal 304, status
-      assert_equal '', body
-    end
+        post('/')
+        assert_status 200
+        assert_body 'ok'
+      end
 
-    it 'should handle multiple ETag values in If-None-Match header' do
-      get '/', {}, { 'HTTP_IF_NONE_MATCH' => '"BAR", *' }
-      assert_equal 304, status
-      assert_equal '', body
+      context "If-None-Match" do
+        it 'returns 200 when If-None-Match is *' do
+          mock_app do
+            post '/' do
+              etag 'foo'
+              'ok'
+            end
+          end
+
+          post('/', {}, 'HTTP_IF_NONE_MATCH' => '*')
+          assert_status 200
+          assert_body 'ok'
+        end
+
+        it 'returns 200 when If-None-Match is * for new resources' do
+          mock_app do
+            post '/' do
+              etag 'foo', :new_resource => true
+              'ok'
+            end
+          end
+
+          post('/', {}, 'HTTP_IF_NONE_MATCH' => '*')
+          assert_status 200
+          assert_body 'ok'
+        end
+
+        it 'returns 412 when If-None-Match is * for existing resources' do
+          mock_app do
+            post '/' do
+              etag 'foo', :new_resource => false
+              'ok'
+            end
+          end
+
+          post('/', {}, 'HTTP_IF_NONE_MATCH' => '*')
+          assert_status 412
+          assert_body ''
+        end
+
+        it 'returns 412 when If-None-Match is the etag' do
+          mock_app do
+            post '/' do
+              etag 'foo'
+              'ok'
+            end
+          end
+
+          post('/', {}, 'HTTP_IF_NONE_MATCH' => '"foo"')
+          assert_status 412
+          assert_body ''
+        end
+
+        it 'returns 412 when If-None-Match includes the etag' do
+          mock_app do
+            post '/' do
+              etag 'foo'
+              'ok'
+            end
+          end
+
+          post('/', {}, 'HTTP_IF_NONE_MATCH' => '"bar", "foo"')
+          assert_status 412
+          assert_body ''
+        end
+
+        it 'returns 200 when If-None-Match does not include the etag' do
+          mock_app do
+            post '/' do
+              etag 'foo'
+              'ok'
+            end
+          end
+
+          post('/', {}, 'HTTP_IF_NONE_MATCH' => '"bar"')
+          assert_status 200
+          assert_body 'ok'
+        end
+
+        it 'ignores If-Modified-Since if If-None-Match does not match' do
+          mock_app do
+            post '/' do
+              etag 'foo'
+              last_modified Time.at(0)
+              'ok'
+            end
+          end
+
+          post('/', {}, 'HTTP_IF_NONE_MATCH' => '"bar"')
+          assert_status 200
+          assert_body 'ok'
+        end
+      end
+
+      context "If-Match" do
+        it 'returns 200 when If-Match is the etag' do
+          mock_app do
+            post '/' do
+              etag 'foo'
+              'ok'
+            end
+          end
+
+          post('/', {}, 'HTTP_IF_MATCH' => '"foo"')
+          assert_status 200
+          assert_body 'ok'
+        end
+
+        it 'returns 200 when If-Match includes the etag' do
+          mock_app do
+            post '/' do
+              etag 'foo'
+              'ok'
+            end
+          end
+
+          post('/', {}, 'HTTP_IF_MATCH' => '"foo", "bar"')
+          assert_status 200
+          assert_body 'ok'
+        end
+
+        it 'returns 412 when If-Match is *' do
+          mock_app do
+            post '/' do
+              etag 'foo'
+              'ok'
+            end
+          end
+
+          post('/', {}, 'HTTP_IF_MATCH' => '*')
+          assert_status 412
+          assert_body ''
+        end
+
+        it 'returns 412 when If-Match is * for new resources' do
+          mock_app do
+            post '/' do
+              etag 'foo', :new_resource => true
+              'ok'
+            end
+          end
+
+          post('/', {}, 'HTTP_IF_MATCH' => '*')
+          assert_status 412
+          assert_body ''
+        end
+
+        it 'returns 200 when If-Match is * for existing resources' do
+          mock_app do
+            post '/' do
+              etag 'foo', :new_resource => false
+              'ok'
+            end
+          end
+
+          post('/', {}, 'HTTP_IF_MATCH' => '*')
+          assert_status 200
+          assert_body 'ok'
+        end
+
+        it 'returns 412 when If-Match does not include the etag' do
+          mock_app do
+            post '/' do
+              etag 'foo'
+              'ok'
+            end
+          end
+
+          post('/', {}, 'HTTP_IF_MATCH' => '"bar"')
+          assert_status 412
+          assert_body ''
+        end
+      end
     end
 
     it 'uses a weak etag with the :weak option' do
-      mock_app {
+      mock_app do
         get '/' do
           etag 'FOO', :weak
           "that's weak, dude."
         end
-      }
+      end
       get '/'
       assert_equal 'W/"FOO"', response['ETag']
+    end
+
+    it 'raises an ArgumentError for an invalid strength' do
+      mock_app do
+        get '/' do
+          etag 'FOO', :w00t
+          "that's weak, dude."
+        end
+      end
+      assert_raise(ArgumentError) { get '/' }
     end
   end
 
@@ -519,6 +1630,96 @@ class HelpersTest < Test::Unit::TestCase
       get '/foo', {}, 'HTTP_REFERER' => 'http://github.com'
       assert redirect?
       assert_equal "http://github.com", response.location
+    end
+  end
+
+  describe 'uri' do
+    it 'generates absolute urls' do
+      mock_app { get('/') { uri }}
+      get '/'
+      assert_equal 'http://example.org/', body
+    end
+
+    it 'includes path_info' do
+      mock_app { get('/:name') { uri }}
+      get '/foo'
+      assert_equal 'http://example.org/foo', body
+    end
+
+    it 'allows passing an alternative to path_info' do
+      mock_app { get('/:name') { uri '/bar' }}
+      get '/foo'
+      assert_equal 'http://example.org/bar', body
+    end
+
+    it 'includes script_name' do
+      mock_app { get('/:name') { uri '/bar' }}
+      get '/foo', {}, { "SCRIPT_NAME" => '/foo' }
+      assert_equal 'http://example.org/foo/bar', body
+    end
+
+    it 'handles absolute URIs' do
+      mock_app { get('/') { uri 'http://google.com' }}
+      get '/'
+      assert_equal 'http://google.com', body
+    end
+
+    it 'handles different protocols' do
+      mock_app { get('/') { uri 'mailto:jsmith@example.com' }}
+      get '/'
+      assert_equal 'mailto:jsmith@example.com', body
+    end
+
+    it 'is aliased to #url' do
+      mock_app { get('/') { url }}
+      get '/'
+      assert_equal 'http://example.org/', body
+    end
+
+    it 'is aliased to #to' do
+      mock_app { get('/') { to }}
+      get '/'
+      assert_equal 'http://example.org/', body
+    end
+  end
+
+  describe 'logger' do
+    it 'logging works when logging is enabled' do
+      mock_app do
+        enable :logging
+        get '/' do
+          logger.info "Program started"
+          logger.warn "Nothing to do!"
+        end
+      end
+      io = StringIO.new
+      get '/', {}, 'rack.errors' => io
+      assert io.string.include?("INFO -- : Program started")
+      assert io.string.include?("WARN -- : Nothing to do")
+    end
+
+    it 'logging works when logging is disable, but no output is produced' do
+      mock_app do
+        disable :logging
+        get '/' do
+          logger.info "Program started"
+          logger.warn "Nothing to do!"
+        end
+      end
+      io = StringIO.new
+      get '/', {}, 'rack.errors' => io
+      assert !io.string.include?("INFO -- : Program started")
+      assert !io.string.include?("WARN -- : Nothing to do")
+    end
+
+    it 'does not create a logger when logging is set to nil' do
+      mock_app do
+        set :logging, nil
+        get('/') { logger.inspect }
+      end
+
+      get '/'
+      assert_body 'nil'
     end
   end
 
